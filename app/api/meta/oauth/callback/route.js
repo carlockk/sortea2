@@ -19,7 +19,7 @@ export async function GET(req) {
 
   if (!client_id || !client_secret || !redirect_uri) {
     return NextResponse.json(
-      { error: "Faltan variables de entorno META_*" },
+      { error: "Faltan variables de entorno META_APP_ID / META_APP_SECRET / META_REDIRECT_URI" },
       { status: 500 }
     );
   }
@@ -27,7 +27,7 @@ export async function GET(req) {
   try {
     await connectMongo();
 
-    // (Opcional) validar state
+    // Validar state (si existe)
     const expected = cookies().get("meta_oauth_state")?.value;
     if (expected && state && expected !== state) {
       return NextResponse.json({ error: "Invalid state" }, { status: 400 });
@@ -45,7 +45,7 @@ export async function GET(req) {
       );
     }
 
-    // 2) Extender a long-lived user token
+    // 2) Intercambiar por long-lived user token
     const longRes = await axios.get("https://graph.facebook.com/v21.0/oauth/access_token", {
       params: {
         grant_type: "fb_exchange_token",
@@ -62,15 +62,14 @@ export async function GET(req) {
       );
     }
 
-    // ⚠️ FIX: calcular expiresAt solo si expires_in es numérico
-    const expiresInRaw = longRes.data?.expires_in;
-    const expiresIn = Number(expiresInRaw);
-    let expiresAt; // undefined si no es válido
+    // FIX: calcular expiresAt solo si expires_in es numérico
+    const expiresIn = Number(longRes.data?.expires_in);
+    let expiresAt;
     if (Number.isFinite(expiresIn) && expiresIn > 0) {
       expiresAt = new Date(Date.now() + expiresIn * 1000);
     }
 
-    // 3) Usuario y páginas
+    // 3) Usuario y páginas (con ig_business si viene directo)
     const meRes = await axios.get("https://graph.facebook.com/v21.0/me", {
       params: { access_token: longToken, fields: "id,name" },
     });
@@ -85,19 +84,39 @@ export async function GET(req) {
     const accountsRes = await axios.get("https://graph.facebook.com/v21.0/me/accounts", {
       params: {
         access_token: longToken,
-        fields: "id,name,access_token,instagram_business_account{id}",
+        fields: "id,name,access_token,instagram_business_account{id,username}",
         limit: 100,
       },
     });
 
-    const pages = (accountsRes.data?.data || []).map((p) => ({
+    const rawPages = (accountsRes.data?.data || []).map((p) => ({
       pageId: p.id,
       name: p.name,
       accessToken: p.access_token,
       igBusinessId: p.instagram_business_account?.id || null,
     }));
 
-    // 4) Upsert sin meter "Invalid Date"
+    // Enriquecer igBusinessId por página usando su page token
+    const pages = [];
+    for (const p of rawPages) {
+      let igId = p.igBusinessId;
+      if (!igId && p.pageId && p.accessToken) {
+        try {
+          const pr = await axios.get(`https://graph.facebook.com/v21.0/${p.pageId}`, {
+            params: {
+              access_token: p.accessToken,
+              fields: "instagram_business_account{id,username}",
+            },
+          });
+          igId = pr.data?.instagram_business_account?.id || null;
+        } catch {
+          // sin IG vinculada a esa página; continuar
+        }
+      }
+      pages.push({ ...p, igBusinessId: igId || null });
+    }
+
+    // 4) Guardar / actualizar en Mongo
     const updateDoc = {
       metaUserId,
       shortLivedToken: shortToken,
@@ -116,7 +135,10 @@ export async function GET(req) {
       new: true,
     });
 
-    // 5) Redirect a tu UI
+    // Limpiar cookie de state
+    cookies().set("meta_oauth_state", "", { path: "/", maxAge: 0 });
+
+    // 5) Redirigir a tu UI
     const base = process.env.PUBLIC_URL || new URL(req.url).origin;
     return NextResponse.redirect(`${base}/dashboard?connected=meta`);
   } catch (e) {
