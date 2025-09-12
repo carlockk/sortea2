@@ -28,7 +28,7 @@ export async function GET(req) {
   try {
     await connectMongo();
 
-    // Validación simple de CSRF (si existiera cookie previa)
+    // Validar CSRF (si guardaste state en cookie al iniciar el login)
     const expected = cookies().get("meta_oauth_state")?.value;
     if (expected && state && expected !== state) {
       return NextResponse.json({ error: "Invalid state" }, { status: 400 });
@@ -46,7 +46,7 @@ export async function GET(req) {
       );
     }
 
-    // 2) short-lived -> long-lived user token
+    // 2) Intercambiar por long-lived user token
     const longRes = await axios.get("https://graph.facebook.com/v21.0/oauth/access_token", {
       params: {
         grant_type: "fb_exchange_token",
@@ -63,18 +63,22 @@ export async function GET(req) {
       );
     }
 
-    // Calcular expiración solo si 'expires_in' es numérico (evita Invalid Date)
+    // NOTA: No logeamos tokens por seguridad.
+    console.log("[META] Long-lived token OK (no mostrado por seguridad)");
+
+    // Evitar "Invalid Date": solo si expires_in es numérico
     const expiresIn = Number(longRes.data?.expires_in);
     let expiresAt;
     if (Number.isFinite(expiresIn) && expiresIn > 0) {
       expiresAt = new Date(Date.now() + expiresIn * 1000);
     }
 
-    // 3) Datos del usuario
+    // 3) Usuario actual
     const meRes = await axios.get("https://graph.facebook.com/v21.0/me", {
       params: { access_token: longToken, fields: "id,name" },
     });
     const metaUserId = meRes.data?.id;
+    console.log("[META] /me →", meRes.data);
     if (!metaUserId) {
       return NextResponse.json(
         { error: "No se pudo obtener el usuario (me)", details: meRes.data },
@@ -82,7 +86,7 @@ export async function GET(req) {
       );
     }
 
-    // 4) Páginas del usuario (intenta traer IG por dos campos posibles)
+    // 4) Páginas del usuario (pedimos ambos campos por si FB rellena uno u otro)
     const accountsRes = await axios.get("https://graph.facebook.com/v21.0/me/accounts", {
       params: {
         access_token: longToken,
@@ -94,18 +98,29 @@ export async function GET(req) {
       },
     });
 
+    // DEBUG: log completo de lo que retorna Meta
+    try {
+      console.log(
+        "[META] /me/accounts (raw) →",
+        JSON.stringify(accountsRes.data, null, 2)
+      );
+    } catch {
+      console.log("[META] /me/accounts (raw) → (no se pudo serializar)");
+    }
+
     const rawPages = (accountsRes.data?.data || []).map((p) => ({
       pageId: p.id,
       name: p.name,
       accessToken: p.access_token,
-      // usa el que exista
+      // Tomamos el IG id del campo que exista
       igBusinessId:
         p.instagram_business_account?.id ||
         p.connected_instagram_account?.id ||
         null,
     }));
 
-    // 5) Enriquecer por página (a veces /me/accounts no trae el vínculo)
+    // 5) Enriquecer por página (a veces /me/accounts no trae el IG y hay que
+    //    ir página por página con el page token)
     const pages = [];
     for (const p of rawPages) {
       let igId = p.igBusinessId;
@@ -124,15 +139,37 @@ export async function GET(req) {
             pr.data?.instagram_business_account?.id ||
             pr.data?.connected_instagram_account?.id ||
             null;
-        } catch {
-          // si falla, seguimos sin IG para esa página
+
+          console.log(
+            `[META] enrich page ${p.pageId} (${p.name}) → igId:`,
+            igId || "(sin IG)"
+          );
+        } catch (err) {
+          console.log(
+            `[META] enrich page ${p.pageId} (${p.name}) → fallo`,
+            err?.response?.data || err?.message
+          );
         }
+      } else {
+        console.log(
+          `[META] page ${p.pageId} (${p.name}) venía con igId:`,
+          igId || "(sin IG)"
+        );
       }
 
       pages.push({ ...p, igBusinessId: igId || null });
     }
 
-    // 6) Guardar en Mongo (upsert)
+    console.log(
+      "[META] pages (normalizadas) →",
+      pages.map((p) => ({
+        pageId: p.pageId,
+        name: p.name,
+        hasIG: !!p.igBusinessId,
+      }))
+    );
+
+    // 6) Guardar en Mongo
     const updateDoc = {
       metaUserId,
       shortLivedToken: shortToken,
@@ -151,7 +188,7 @@ export async function GET(req) {
       new: true,
     });
 
-    // Limpia cookie de state
+    // Limpiar cookie de state si existiera
     cookies().set("meta_oauth_state", "", { path: "/", maxAge: 0 });
 
     // 7) Redirigir al dashboard
