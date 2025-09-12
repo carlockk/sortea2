@@ -12,12 +12,8 @@ export async function GET() {
   }
 
   const state = crypto.randomUUID();
-  // cookie por 5 min
   cookies().set("meta_oauth_state", state, {
-    httpOnly: true,
-    sameSite: "lax",
-    maxAge: 300,
-    path: "/",
+    httpOnly: true, sameSite: "lax", maxAge: 300, path: "/",
   });
 
   const scope = [
@@ -26,6 +22,9 @@ export async function GET() {
     "pages_show_list",
     "pages_read_engagement",
     "pages_manage_metadata",
+    // 👇 Instagram
+    "instagram_basic",
+    "instagram_manage_comments",
   ].join(",");
 
   const url =
