@@ -1,19 +1,25 @@
-import mongoose from "mongoose";
+import mongoose, { Schema } from "mongoose";
 
-const PageSchema = new mongoose.Schema({
-  pageId: String,
-  name: String,
-  accessToken: String,
-  igBusinessId: String, // instagram_business_account.id si existe
-}, { _id: false });
+const PageSchema = new Schema(
+  {
+    pageId: String,
+    name: String,
+    accessToken: String,
+    igBusinessId: String,
+  },
+  { _id: false }
+);
 
-const MetaAuthSchema = new mongoose.Schema({
-  metaUserId: { type: String, index: true },
-  shortLivedToken: String,
-  longLivedToken: String,
-  longLivedTokenExpiresAt: Date,
-  pages: [PageSchema],
-  raw: Object,
-}, { timestamps: true });
+const MetaAuthSchema = new Schema(
+  {
+    metaUserId: { type: String, unique: true },
+    shortLivedToken: String,
+    longLivedToken: String,
+    longLivedTokenExpiresAt: { type: Date, required: false }, // ← opcional
+    pages: [PageSchema],
+    raw: Schema.Types.Mixed,
+  },
+  { timestamps: true }
+);
 
 export default mongoose.models.MetaAuth || mongoose.model("MetaAuth", MetaAuthSchema);
